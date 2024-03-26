@@ -1,0 +1,527 @@
+##############################################################################################################################################################################
+# Fitting a Single-Step Genomic-BLUP model (ssGBLUP) with ASReml-R
+##############################################################################################################################################################################
+
+rm(list=ls()) 
+setwd("D:/OneDrive - CGIAR/GBLUP project/SSD-Hiaal Tropics/Cleaned_data/Relationship matrix")
+
+##############################################################################################################################################################################
+# Obtaining APED
+
+#import pedigree data
+pedigree<-read.table("Pedigree.txt",h=TRUE) 
+head(pedigree)
+tail(pedigree)
+
+# install nadiv package if using for the first time
+# library(remotes)
+# library(devtools)
+# install_gitAub("matthewwolak/nadiv", ref = "devel")
+
+# load the library
+library(nadiv)
+A <- AGHmatrix::Amatrix(data = pedigree[,1:3])
+
+A[1:30,1:30]
+
+A[1:15,1:15]
+dim(A)
+
+# Get heatmap for A
+library(ASRgenomics)
+# ASRgenomics::kinship.heatmap(A)
+
+# Diagnostics of A
+check_A <- kinship.diagnostics(K=A)
+
+ls(check_A)
+check_A$list.diagonal
+check_A$plot.diag
+check_A$plot.offdiag  
+check_A$list.duplicate
+
+##################################################################################################################################################################################
+# Obtaining M (under QC)
+# Reading full marker data
+markerFULL<-read.table("markerFull.txt",h=TRUE)
+# vView(markerFULL)
+markerFULL[markerFULL==2] <- 3
+markerFULL[markerFULL==1] <- 2
+markerFULL[markerFULL==3] <- 1
+markerFULL[1:30,1:30]
+GD <- t(markerFULL)
+sapply(GD, class)
+
+GD[1:30,1:30]
+dim(GD)
+
+M_filter <- qc.filtering(M=GD, base=FALSE, ref=NULL, maf=0.05, marker.callrate=0.2,
+                         ind.callrate=0.2, heterozygosity = 0.95, Fis = 1,
+                         impute=FALSE, na.string='-9', plots=TRUE)
+M_filter$M.clean[1:50,1:50]
+dim(M_filter$M.clean) # 1486 x 707
+
+M_filter$plot.heteroz
+M_filter$plot.maf
+M_filter$plot.missing.ind
+M_filter$plot.missing.SNP
+M_filter$plot.Fis
+
+# Saving imputed, filtered M matrix
+write.table(M_filter$M.clean, file='../Mclean.txt')
+
+##################################################################################################################################################################################
+# Obtaining AHAT
+
+G <- G.matrix(M=M_filter$M.clean, method='VanRaden', na.string=NA)$G
+G[1:30, 1:30]
+dim(G)
+
+##################################################################################################################################################################################
+# Diagnostics on the Kinship Matrix
+
+check_G <- kinship.diagnostics(K=G)
+
+ls(check_G)
+check_G$list.diagonal
+check_G$plot.diag
+check_G$plot.offdiag  
+check_G$list.duplicate
+
+#################################################################################################################################################################################
+#################################################################################################################################################################################
+# Tuning a Genomic-based Kinship Matrix
+
+# G_blend <- G.tuneup(G=G, blend=TRUE, pblend=0.05, rcn = TRUE)$Gb
+G_bend <- G.tuneup(G=G, bend=TRUE, rcn = TRUE)$Gb
+G[1:8, 1:8]
+
+# G_blend[1:8, 1:8]
+G_bend[1:8, 1:8]
+
+check_G_bend <- kinship.diagnostics(K=G_bend)
+check_G_bend$list.diagonal
+check_G_bend$plot.diag
+check_G_bend$plot.offdiag  
+check_G_bend$list.duplicate
+
+# Matching GRM to A matrix
+dim(A)
+dim(G_bend)
+G2A <- match.G2A(A = A, G = G_bend, clean = TRUE, ord = TRUE, mism = TRUE, RMdiff = TRUE)
+
+ls(G2A)
+dim(G2A$Aclean)
+dim(G2A$Gclean)
+G2A$Aclean[1:15, 1:15]
+G2A$Gclean[1:15, 1:15]
+
+# Some comparison of GRM to A values
+G2A$plotG2A
+head(G2A$RM)
+head(G2A$RM[G2A$RM$absdiff > 0.20,])
+
+# Aligning the G matrix to the A matrix
+G_align <- G.tuneup(G = G2A$Gclean, A = G2A$Aclean, align = TRUE)$Gb
+G2A$Gclean[1:30, 1:30]
+G_align[1:30, 1:30]
+
+# Checking again GRM to see if there still issues
+Ga2A <- match.G2A(A = A, G = G_align, clean = TRUE, ord = TRUE, mism = TRUE,  RMdiff = TRUE)
+Ga2A$plotG2A
+dim(Ga2A$RM[Ga2A$RM$absdiff > 0.20,])
+head(Ga2A$RM[Ga2A$RM$absdiff > 0.25,])
+
+# Diagnostics of the align matrix
+check_G$plot.diag      # original
+check_G$plot.offdiag   # original
+
+check_G_align <- kinship.diagnostics(K = G_align,  diagonal.thr.small = 0.8,
+                                     diagonal.thr.large = 1.2, duplicate.thr = 0.95)
+check_G_align$plot.diag     # aligned
+check_G_align$plot.offdiag  # aligned
+
+
+#################################################################################################################################################################################
+## Verification with the G-inverse
+
+Ginv.align <- G.inverse(G=G_align, sparseform=FALSE)$Ginv
+
+head(Ginv.align)
+head(attr(Ginv.align, "rowNames"))
+head(attr(Ginv.align, "colNames"))
+attr(Ginv.align, "INVERSE")
+
+
+
+#################################################################################################################################################################################
+# Generating/Exploring a Hybrid Genomic Matrix (H)
+
+? H.inverse
+Ginv.align[1:5, 1:5] # Note we are using G_align ...
+Hinv.sparse <- H.inverse(A = A, G = Ginv.align, sparseform = TRUE)
+head(Hinv.sparse)
+
+H <- H.matrix(A = A, Ginv = Ginv.align, sparseform = FALSE)
+A[1:9, 1:9]
+H[1:30, 1:30]
+
+dim(H)
+
+check_H <- kinship.diagnostics(K = H,  diagonal.thr.small = 0.8,
+                               diagonal.thr.large = 1.2, duplicate.thr = 0.95,
+                               sample.plot = 0.2)
+check_H$plot.diag
+check_H$plot.offdiag
+
+#################################################################################################################################################################################
+# Population Structure with Genomic Data
+#################################################################################################################################################################################
+
+# using H matrix 
+A[1:5, 1:5] # Note we are using G_align ...
+pca_H_SSDF6 <- kinship.pca(K= H,ncp = 707)
+
+pca_H_SSDF6$eigenvalues 
+pca_H_SSDF6$plot.scree 
+pca_H_SSDF6$plot.pca
+
+
+head(pca_H_SSDF6$pca.scores)
+
+pca.score_H <- as.data.frame(pca_H_SSDF6$pca.scores)
+write.table(pca.score_H  , file = "pca.score_H.csv", row.names = T)
+
+
+
+
+################################################################################################################################################################################
+# Fitting a hybrid Genomic-BLUP (HGBLUP) model with ASReml-R
+################################################################################################################################################################################
+
+
+pheno<-read.table("BLS_adjusted_means.txt",h=TRUE) 
+head(pheno)
+tail(pheno)
+
+pheno$GenoID <- as.factor(pheno$GenoID)
+pheno$Family <- as.factor(pheno$Family)
+pheno$Mother <- as.factor(pheno$Mother)
+pheno$Father <- as.factor(pheno$Father)
+str(pheno)
+
+Hinv.sparse <- H.inverse(A = A, G = Ginv.align, sparseform = TRUE)
+dim(H)
+
+pheno.H <- match.kinship2pheno(K = H, pheno.data = pheno,
+                               indiv = 'GenoID', clean = FALSE, mism = TRUE)
+head(pheno.H$matchesP)
+pheno.subsetH <- pheno[pheno.H$matchesP, ]
+dim(pheno.subsetH)
+head(pheno.subsetH)
+
+##### k-fold cross-validation for GBLUP ########
+# set number of iterations
+num_iterationsHopt <- 10
+pheno.subsetH_sorted <- pheno.subsetH[order(pheno.subsetH$GenoID),]
+
+library(STPGA)
+library(dplyr)
+library(asreml)
+
+# Select the first 100 principal components for error variance estimation
+selected_pcs_H <- pca.score_H[, 1:100]
+selected_pc100_H <- as.matrix(selected_pcs_H)
+
+# Create a data frame with GenoID column and num_iterationsG  additional columns
+
+# Create a data frame with GenoID column and n additional columns to store PB_GEBV and PB_SE for training set
+combH_IT_training_opt <- data.frame(GenoID = pheno.subsetH_sorted$GenoID, PB = pheno.subsetH_sorted$PB, stringsAsFactors = FALSE)
+combH_IT_SE_training_opt <- data.frame(GenoID = pheno.subsetH_sorted$GenoID, stringsAsFactors = FALSE)
+
+# Create a data frame with GenoID column and n additional columns to store PB_GEBV and PB_SE for testing set
+combH_IT_testing_opt <- data.frame(GenoID = pheno.subsetH_sorted$GenoID, PB = pheno.subsetH_sorted$PB, stringsAsFactors = FALSE)
+combH_IT_SE_testing_opt <- data.frame(GenoID = pheno.subsetH_sorted$GenoID, stringsAsFactors = FALSE)
+
+
+# Prepare data for cross-validation
+pheno.subsetH_sorted <- pheno.subsetH[order(pheno.subsetH$GenoID),]
+kH <- 5
+nH <- length(pheno.subsetH_sorted$GenoID)
+selH <- rep(1:kH, length.out = nH) # tAis will shuffle the fold assignments
+
+yH <- data.frame(GenoID = pheno.subsetH_sorted$GenoID, PB = pheno.subsetH_sorted$PB)   # Response variable
+
+# Initialize data frames to store predicted values
+# predictionsH_training <- data.frame(GenoID = pheno.subsetA_sorted$GenoID, PB_obs = pheno.subsetA_sorted$PB, PB_HGEBV = rep(NA, nG), PB_SE = rep(NA, nG))
+# predictionsH_testing <- data.frame(GenoID = pheno.subsetA_sorted$GenoID, PB_obs = pheno.subsetA_sorted$PB, PB_HGEBV = rep(NA, nG), PB_SE = rep(NA, nG), fold = rep(NA, nG))
+h2_optHcv_Cullis <- matrix(data=NA, nrow=kH, ncol=1)
+h2_optHcv_stand <- matrix(data=NA, nrow=kH, ncol=1)
+PA_optH_training <- matrix(data=NA, nrow=kH, ncol=1)
+PA_optH_testing <- matrix(data=NA, nrow=kH, ncol=1)
+
+# Initialize variables to store cumulative results for interation
+total_h2_optHcv_Cullis <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_h2_optHcv_stand <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_PA_optH_training <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_PA_optH_testing <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_optHACC_Cullis_training <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_optHACC_stand_training <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_optHACC_Cullis_testing <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+total_optHACC_stand_testing <- matrix(data=NA, nrow = num_iterationsHopt, ncol=1)
+
+# Main loop for cross-validation iterations
+for (iteration in 1:num_iterationsHopt){
+  
+  # Sample data into k groups for cross-validation
+  groupH <- sample(selH, nH)
+  table(groupH) 
+  
+  # Fit GBLUP model and evaluate performance for each group
+  for (fold in 1:kH){
+    
+    # Split the data into training and validation sets
+    trainingH_indices <- which(selH != fold)
+    validationH_indices <- which(selH == fold)
+    
+    # Extract training and validation data
+    
+    trainingH_data <- pheno.subsetH_sorted[selH != fold, ]
+    validationH_data <- pheno.subsetH_sorted[selH == fold, ]
+    
+    # Use GenAlgForSubsetSelection function with PEVMEAN optimality criterion
+    Candidates_H <- pheno.subsetH_sorted$GenoID
+    nH_train <- length(trainingH_data$GenoID)
+    Test_H <- validationH_data$GenoID
+    Trainopt_H <- GenAlgForSubsetSelection(P=selected_pc100_H[rownames(selected_pc100_H)%in%Candidates_H,],
+                                           Candidates=Candidates_H,
+                                           Test=Test_H,
+                                           ntoselect=2200, 
+                                           InitPop=NULL,
+                                           npop=100, 
+                                           nelite=5, 
+                                           mutprob=.8, 
+                                           mutintensity = 1,
+                                           niterations=300,
+                                           minitbefstop=100, 
+                                           tabumemsize = 1,
+                                           plotiters=FALSE,
+                                           lambda=1e-6,
+                                           errorstat="PEVMEAN", 
+                                           mc.cores = 8)
+    
+    TrainID_H <- as.data.frame(Trainopt_H$`Solution with rank 1`)
+    names(TrainID_H)[1] = "GenoID"
+    
+    # Convert GenoID columns to character type
+    TrainID_H$GenoID <- as.character(TrainID_H$GenoID)
+    trainingH_data$GenoID <- as.character(trainingH_data$GenoID)
+    validationH_data$GenoID <- as.character(validationH_data$GenoID)
+    
+    # Exclude individuals from Train_G tAat are present in validation_data
+    Train_H <- trainingH_data[(trainingH_data$GenoID %in% TrainID_H$GenoID), ]
+    
+    nH_trainF <- length(Train_H$GenoID)
+    
+    # Exclude individuals from Train_G tAat are present in validation_data
+    excluded_individuals_H <- trainingH_data[!(trainingH_data$GenoID %in% TrainID_H$GenoID), ]
+    
+    
+    # Add excluded individuals to validation set
+    validationH_dataF <- rbind(validationH_data, excluded_individuals_H)%>% distinct()
+    nH_testF <- length(validationH_dataF$GenoID)
+    
+    #length(unique(validationH_dataF$GenoID))
+    yH_train_opt <- Train_H$PB
+    yH_test_opt <- validationH_dataF$PB
+    
+    
+    
+    # Initialize data frames to store predicted values
+    predictionsH_training_opt <- data.frame(GenoID = Train_H$GenoID, PB_obs = Train_H$PB, PB_GEBV = rep(NA, nH_trainF), PB_SE = rep(NA, nH_trainF))
+    predictionsH_testing_opt <- data.frame(GenoID = validationH_dataF$GenoID, PB_obs = validationH_dataF$PB, PB_GEBV = rep(NA, nH_testF), PB_SE = rep(NA, nH_testF), fold = rep(NA, nH_testF))
+    
+    yHcv_opt <- Train_H$PB
+    
+    for (j in 1:nH_trainF) {
+      if(groupH[j] == fold) { yHcv_opt[j]<-NA }
+    }
+    
+    # Implement GBLUP model fitting and evaluation here
+    Train_H$GenoID <- as.factor(Train_H$GenoID)
+    Train_H$Family <- as.factor(Train_H$Family)
+    
+    ssGBLUPcv_opt <- asreml(fixed = yHcv_opt ~ 1, #+ Family,
+                            random = ~vm(GenoID, Hinv.sparse) + Family,
+                            residual = ~idv(units,init = 2),
+                            na.action = na.method( x = 'include', y = 'include'),
+                            workspace = 1e07,
+                            pworkspace=32e6,
+                            data = Train_H,
+                            start = list(GenoID = 3.1, Family = 1.4))
+    
+    # ssGBLUPcv_opt_opt <- update.asreml(ssGBLUPcv_opt_opt)
+    # HGBLUPcv_opt <- update.asreml(ssGBLUPcv_opt)
+    # HGBLUPcv_opt <- update.asreml(ssGBLUPcv_opt)
+    # HGBLUPcv_opt <- update.asreml(ssGBLUPcv_opt)
+    # HGBLUPcv_opt <- update.asreml(ssGBLUPcv_opt)
+    # HGEBVcv_opt <- as.data.frame(summary(ssGBLUPcv_opt, coef=TRUE)$coef.random)
+    # HGEBVcv_opt <- HGEBVcv_opt[order(rownames(HGEBVcv_opt)),]
+    # HGEBVcv_opt <- HGEBVcv_opt[,1]
+    
+    # Predict on the training set
+    predHcv_opt <- predict(ssGBLUPcv_opt, classify="GenoID", sed=T, pworkspace = 32e36)
+    predHGBLUPcv1_opt <- predHcv_opt$pvals
+    predHGBLUPcv_opt <- as.data.frame(predHGBLUPcv1_opt[,1:3])
+    
+    # Extract genetic variance and avsed
+    varcomp_HGBLUPcv_opt <- as.data.frame(summary(ssGBLUPcv_opt)$varcomp)
+    varg_HGBLUPcv_opt <- varcomp_HGBLUPcv_opt[2,1]
+    
+    # Extract avsed
+    avsed_HGBLUPcv1_opt <- as.data.frame(predHcv_opt$avsed)
+    avsed_HGBLUPcv_opt <-  avsed_HGBLUPcv1_opt[2,1]
+    
+    # Estimate heritability using Cullis et al. and the standard approach
+    (h2_HGBLUPcv_opt_Cullis <- vpredict(ssGBLUPcv_opt,h2~varg_HGBLUPcv_opt/(varg_HGBLUPcv_opt + (avsed_HGBLUPcv_opt)/2)))
+    (h2_optHcv_Cullis[fold] <- as.numeric(h2_HGBLUPcv_opt_Cullis[1]))
+    
+    # Standard approach
+    h2_HGBLUPcv_opt_stand <- varcomp_HGBLUPcv_opt['vm(GenoID, Hinv.sparse)', 'component'] / 
+      (varcomp_HGBLUPcv_opt['vm(GenoID, Hinv.sparse)', 'component'] + varcomp_HGBLUPcv_opt['Family', 'component'] + 
+         varcomp_HGBLUPcv_opt['units!units', 'component'])
+    
+    (h2_optHcv_stand[fold] <- as.numeric(h2_HGBLUPcv_opt_stand[1]))
+    
+    # Convert GenoID columns to character type
+    predictionsH_training_opt$GenoID <- as.character(predictionsH_training_opt$GenoID)
+    predHGBLUPcv_opt$GenoID <- as.character(predHGBLUPcv_opt$GenoID)
+    
+    # Merge predHGBLUPcv with predictions_training based on GenoID
+    predHGBLUPcvF_training_opt <- merge(predHGBLUPcv_opt, predictionsH_training_opt, by = "GenoID", all = FALSE)
+    
+    # Predictive Ability  corr(yadj,ghat) training
+    (PA_optH_training[fold] <- cor(predHGBLUPcvF_training_opt$PB_obs, predHGBLUPcvF_training_opt$predicted.value, method='pearson', use="complete.obs"))
+    
+    for (j in 1:nH_trainF) {
+      #if(groupG[j] == fold) { predictions_training[j] <- GEBVcv[j] } 
+      if(groupH[j] == fold) { 
+        predictionsH_training_opt$PB_HGEBV[predictionsH_training_opt$GenoID == predHGBLUPcvF_training_opt$GenoID[j]] <- predHGBLUPcvF_training_opt$predicted.value[j]
+        predictionsH_training_opt$SE_HGEBV[predictionsH_training_opt$GenoID == predHGBLUPcvF_training_opt$GenoID[j]] <- predHGBLUPcvF_training_opt$std.error[j]} 
+    }
+    
+    # Predict the validation set
+    validationH_pred_opt <- predict(ssGBLUPcv_opt, 
+                                    classify="GenoID", 
+                                    sed=T, 
+                                    newdata = validationH_dataF, 
+                                    pworkspace = 32e36)
+    
+    predHGBLUPcv_testing1_opt <- validationH_pred_opt$pvals
+    predHGBLUPcv_testing_opt <- as.data.frame(predHGBLUPcv_testing1_opt[,1:3])
+    
+    # Convert GenoID columns to character type
+    predictionsH_testing_opt$GenoID <- as.character(predictionsH_testing_opt$GenoID)
+    predHGBLUPcv_testing_opt$GenoID <- as.character(predHGBLUPcv_testing_opt$GenoID)
+    
+    # Merge predHGBLUPcv with predictions_testing based on GenoID
+    predHGBLUPcvF_testing_opt <- merge(predHGBLUPcv_testing_opt, predictionsH_testing_opt, by = "GenoID", all = FALSE)
+    
+    (PA_optH_testing[fold] <- cor(predHGBLUPcvF_testing_opt$PB_obs, predHGBLUPcvF_testing_opt$predicted.value, method='pearson', use="complete.obs"))
+    
+    for (z in 1:nH_testF) {
+      # insert predicted values into predictions_testing
+      if (predHGBLUPcv_testing_opt$GenoID[z] %in% predictionsH_testing_opt$GenoID) {
+        predictionsH_testing_opt$PB_HGEBV[predictionsH_testing_opt$GenoID == predHGBLUPcvF_testing_opt$GenoID[z]] <- predHGBLUPcv_testing_opt$predicted.value[z]
+        predictionsH_testing_opt$SE_HGEBV[predictionsH_testing_opt$GenoID == predHGBLUPcvF_testing_opt$GenoID[z]] <- predHGBLUPcv_testing_opt$std.error[z]
+        predictionsH_testing_opt$Fold[predictionsH_testing_opt$GenoID == predHGBLUPcvF_testing_opt$GenoID[z]] <- fold
+      }
+    }
+  }
+  
+  # Heritability (GS cross-validation)
+  h2_optHcv_Cullis
+  mean(h2_optHcv_Cullis)
+  h2_optHcv_stand
+  mean(h2_optHcv_stand)
+  PA_optH_training
+  mean(PA_optH_training)
+  PA_optH_testing
+  mean(PA_optH_testing)
+  
+  # Predictive Accuracy corr(greal,ghat)
+  (ACC_optH_Cullis_training <- PA_optH_training/sqrt(mean(h2_optHcv_Cullis)))  # Approximation
+  (ACC_optH_stand_training <- PA_optH_training/sqrt(mean(h2_optHcv_stand)))  # Approximation
+  
+  (ACC_optH_Cullis_testing <- PA_optH_testing/sqrt(mean(h2_optHcv_Cullis)))  # Approximation
+  (ACC_optH_stand_testing <- PA_optH_testing/sqrt(mean(h2_optHcv_stand)))  # Approximation
+  
+  # Update cumulative results at the end of each iteration
+  total_h2_optHcv_Cullis[iteration] <- mean(h2_optHcv_Cullis)
+  total_h2_optHcv_stand[iteration] <- mean(h2_optHcv_stand)
+  total_PA_optH_training[iteration] <- mean(PA_optH_training)
+  total_PA_optH_testing[iteration] <- mean(PA_optH_testing)
+  total_optHACC_Cullis_training[iteration] <- ACC_optH_Cullis_training
+  total_optHACC_Cullis_testing[iteration] <- ACC_optH_Cullis_testing
+  total_optHACC_stand_training[iteration] <- ACC_optH_stand_training
+  total_optHACC_stand_testing[iteration] <- ACC_optH_stand_testing
+  
+  # Store PB_GEBV and SE_GEBV values for each iteration in training set
+  for (p in 1:nrow(predHGBLUPcvF_training_opt)) {
+    if (predHGBLUPcvF_training_opt$GenoID[p] %in% combH_IT_training_opt$GenoID) {
+      indexp <- which(combH_IT_training_opt$GenoID == predHGBLUPcvF_training_opt$GenoID[p])
+      combH_IT_training_opt[[paste0("PB_HGEBV_", iteration)]][indexn] <- predHGBLUPcvF_training_opt$predicted.value[p]
+      combH_IT_SE_training_opt[[paste0("SE_HGEBV_", iteration)]][indexn] <- predHGBLUPcvF_training_opt$std.error[p]
+    } else {
+      cat("GenoID", predHGBLUPcvF_training_opt$GenoID[p], "not found in combG_IT_training_opt\n")
+    }
+  }
+  
+  
+  # Store PB_GEBV and SE_GEBV values for each iteration in testing_opt set
+  for (p in 1:nrow(predHGBLUPcvF_testing_opt)) {
+    geno_id <- predHGBLUPcvF_testing_opt$GenoID[p]
+    if (geno_id %in% combH_IT_testing_opt$GenoID) {
+      index <- which(combH_IT_testing_opt$GenoID == geno_id)
+      new_col_name <- paste0("PB_HGEBV_", iteration)
+      new_se_col_name <- paste0("SE_HGEBV_", iteration)
+      combH_IT_testing_opt[index, new_col_name] <- predHGBLUPcvF_testing_opt$predicted.value[p]
+      combH_IT_SE_testing_opt[index, new_se_col_name] <- predHGBLUPcvF_testing_opt$std.error[p]
+    } else {
+      cat("GenoID", geno_id, "not found in combH_IT_testing_opt\n")
+    }
+  }
+}
+
+# Calculate row means of PB_GEBV over iterations
+combH_IT_training_opt$PB_HGEBV_avg <- rowMeans(combH_IT_training_opt[, -(1:2)], na.rm = TRUE)
+combH_IT_SE_training_opt$SE_HGEBV_avg <- rowMeans(combH_IT_SE_training_opt[, -1], na.rm = TRUE)
+combH_training_final_opt <- merge(combH_IT_training_opt, combH_IT_SE_training_opt, by = "GenoID", all = TRUE)
+
+combH_IT_testing_opt$PB_HGEBV_avg <- rowMeans(combH_IT_testing_opt[, -(1:2)], na.rm = TRUE)
+combH_IT_SE_testing_opt$SE_HGEBV_avg <- rowMeans(combH_IT_SE_testing_opt[, -1], na.rm = TRUE)
+combH_testing_final_opt <- merge(combH_IT_testing_opt, combH_IT_SE_testing_opt, by = "GenoID", all = TRUE)
+
+# Merge by rows
+write.table(combH_training_final_opt, file = "PB_HGBLUP_pred_training_opt.csv", row.names = F)
+write.table(combH_testing_final_opt , file = "PB_HGBLUP_pred_testing_opt.csv", row.names = F)
+
+# Calculate average values over all iterations
+avg_h2_optHcv_Cullis <- mean(total_h2_optHcv_Cullis)
+avg_h2_optHcv_stand <- mean(total_h2_optHcv_stand)
+avg_PA_optH_training <- mean(total_PA_optH_training)
+avg_PA_optH_testing <- mean(total_PA_optH_testing)
+avg_optHACC_Cullis_training <- mean(total_optHACC_Cullis_training)
+avg_optHACC_stand_training <- mean(total_optHACC_stand_training)
+avg_optHACC_Cullis_testing <- mean(total_optHACC_Cullis_testing)
+avg_optHACC_stand_testing <- mean(total_optHACC_stand_testing)
+
+# Print or use the average values as needed
+print(avg_h2_optHcv_Cullis)
+print(avg_h2_optHcv_stand)
+print(avg_PA_optH_training)
+print(avg_PA_optH_testing)
+print(avg_optHACC_Cullis_training)
+print(avg_optHACC_stand_training)
+print(avg_optHACC_Cullis_testing)
+print(avg_optHACC_stand_testing)
