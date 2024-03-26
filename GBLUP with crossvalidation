@@ -1,0 +1,519 @@
+###################################################################################################################################################################################
+# GBLUP using PEVMEAN sampling with k-fold cross validation
+###################################################################################################################################################################################
+rm(list=ls()) 
+setwd("D:/OneDrive - CGIAR/GBLUP project/SSD-Hiaal Tropics/Cleaned_data/Relationship matrix")
+
+####################################################################################################################################################################################
+####################################################################################################################################################################################
+# Obtaining APED
+# import pedigree data
+pedigree<-read.table("Pedigree.txt",h=TRUE) 
+head(pedigree)
+tail(pedigree)
+
+# install nadiv package if using for the first time
+# library(remotes)
+# library(devtools)
+# install_gitAub("matthewwolak/nadiv", ref = "devel")
+
+# load the library
+library(nadiv)
+A <- AGHmatrix::Amatrix(data = pedigree[,1:3])
+
+A[1:30,1:30]
+
+A[1:15,1:15]
+dim(A)
+
+# Get heatmap for A
+library(ASRgenomics)
+# ASRgenomics::kinship.heatmap(A)
+
+# Diagnostics of A
+check_A <- kinship.diagnostics(K=A)
+
+ls(check_A)
+check_A$list.diagonal
+check_A$plot.diag
+check_A$plot.offdiag  
+check_A$list.duplicate
+
+##################################################################################################################################################################################
+# Obtaining M (under QC)
+# Reading full marker data
+markerFULL<-read.table("markerFull.txt",h=TRUE)
+# View(markerFULL)
+
+markerFULL[markerFULL==2] <- 3
+markerFULL[markerFULL==1] <- 2
+markerFULL[markerFULL==3] <- 1
+markerFULL[1:30,1:30]
+GD <- t(markerFULL)
+sapply(GD, class)
+
+GD[1:30,1:30]
+dim(GD)
+
+M_filter <- qc.filtering(M=GD, base=FALSE, ref=NULL, maf=0.05, marker.callrate=0.2,
+                         ind.callrate=0.2, heterozygosity = 0.95, Fis = 1,
+                         impute=FALSE, na.string='-9', plots=TRUE)
+M_filter$M.clean[1:50,1:50]
+dim(M_filter$M.clean) # 1486 x 707
+
+M_filter$plot.heteroz
+M_filter$plot.maf
+M_filter$plot.missing.ind
+M_filter$plot.missing.SNP
+M_filter$plot.Fis
+
+# Saving imputed, filtered M matrix
+write.table(M_filter$M.clean, file='../Mclean.txt')
+
+#################################################################################################################################################################################
+################### Obtaining AHAT###############################################################################################################################################
+
+G <- G.matrix(M=M_filter$M.clean, method='VanRaden', na.string=NA)$G
+G[1:30, 1:30]
+dim(G)
+
+#################################################################################################################################################################################
+# Diagnostics on the Kinship Matrix
+
+check_G <- kinship.diagnostics(K=G)
+
+ls(check_G)
+check_G$list.diagonal
+check_G$plot.diag
+check_G$plot.offdiag  
+check_G$list.duplicate
+
+
+
+##################################################################################################################################################################################
+##################################################################################################################################################################################
+# Tuning a Genomic-based Kinship Matrix
+
+#G_blend <- G.tuneup(G=G, blend=TRUE, pblend=0.05, rcn = TRUE)$Gb
+G_bend <- G.tuneup(G=G, bend=TRUE, rcn = TRUE)$Gb
+G[1:8, 1:8]
+
+#G_blend[1:8, 1:8]
+G_bend[1:8, 1:8]
+
+check_G_bend <- kinship.diagnostics(K=G_bend)
+check_G_bend$list.diagonal
+check_G_bend$plot.diag
+check_G_bend$plot.offdiag  
+check_G_bend$list.duplicate
+
+# Matching GRM to A matrix
+dim(A)
+dim(G_bend)
+G2A <- match.G2A(A = A, G = G_bend, clean = TRUE, ord = TRUE, mism = TRUE, RMdiff = TRUE)
+
+ls(G2A)
+dim(G2A$Aclean)
+dim(G2A$Gclean)
+G2A$Aclean[1:15, 1:15]
+G2A$Gclean[1:15, 1:15]
+
+# Some comparison of GRM to A values
+G2A$plotG2A
+head(G2A$RM)
+head(G2A$RM[G2A$RM$absdiff > 0.20,])
+
+# Aligning the G matrix to the A matrix
+G_align <- G.tuneup(G = G2A$Gclean, A = G2A$Aclean, align = TRUE)$Gb
+G2A$Gclean[1:30, 1:30]
+G_align[1:30, 1:30]
+
+# Checking again GRM to see if there still issues
+Ga2A <- match.G2A(A = A, G = G_align, clean = TRUE, ord = TRUE, mism = TRUE,  RMdiff = TRUE)
+Ga2A$plotG2A
+dim(Ga2A$RM[Ga2A$RM$absdiff > 0.20,])
+head(Ga2A$RM[Ga2A$RM$absdiff > 0.25,])
+
+# Diagnostics of the align matrix
+check_G$plot.diag      # original
+check_G$plot.offdiag   # original
+
+check_G_align <- kinship.diagnostics(K = G_align,  diagonal.thr.small = 0.8,
+                                     diagonal.thr.large = 1.2, duplicate.thr = 0.95)
+check_G_align$plot.diag     # aligned
+check_G_align$plot.offdiag  # aligned
+
+
+##################################################################################################################################################################################
+## Verification with the G-inverse
+
+Ginv.align <- G.inverse(G=G_align, sparseform=FALSE)$Ginv
+
+head(Ginv.align)
+head(attr(Ginv.align, "rowNames"))
+head(attr(Ginv.align, "colNames"))
+attr(Ginv.align, "INVERSE")
+
+##################################################################################################################################################################################
+# Obtaining inverse sparse matrix for ASReml-R
+? G.inverse
+Ginv.sparse <- G.inverse(G = G_align, sparseform = TRUE)$Ginv
+head(Ginv.sparse)
+head(attr(Ginv.sparse, "rowNames"))
+head(attr(Ginv.sparse, "colNames"))
+attr(Ginv.sparse, "INVERSE")
+
+
+##################################################################################################################################################################################
+# Population Structure with Genomic Data
+##################################################################################################################################################################################
+# using G_align 
+Ginv.align[1:5, 1:5] # Note we are using G_align ...
+pca_SSDF6 <- kinship.pca(K= G_align,ncp = 707)
+
+pca_SSDF6$eigenvalues 
+pca_SSDF6$plot.scree 
+pca_SSDF6$plot.pca
+
+
+head(pca_SSDF6$pca.scores)
+
+pca.score <- as.data.frame(pca_SSDF6$pca.scores)
+write.table(pca.score  , file = "pca.score.csv", row.names = T)
+
+
+
+################################################################################################################################################################################
+# Fitting a Genomic-BLUP (GBLUP) model with ASReml-R
+################################################################################################################################################################################
+
+pheno<-read.table("BLS_adjusted_means.txt",h=TRUE) 
+head(pheno)
+tail(pheno)
+
+pheno$GenoID <- as.factor(pheno$GenoID)
+pheno$Family <- as.factor(pheno$Family)
+pheno$Mother <- as.factor(pheno$Mother)
+pheno$Father <- as.factor(pheno$Father)
+str(pheno)
+
+# Preparing to fit  Genomic-BLUP (GBLUP) model with ASReml-R
+library(asreml)
+library(dplyr)
+library(STPGA)
+asreml.license.offline(30)
+head(pheno)
+dim(pheno)
+dim(G_align)
+
+pheno.G <- match.kinship2pheno(K = G_align, pheno.data = pheno,
+                               indiv = 'GenoID', clean = FALSE, mism = TRUE)
+head(pheno.G$matchesP)
+pheno.subset <- pheno[pheno.G$matchesP, ]
+dim(pheno.subset)
+head(pheno.subset)
+
+##################################################################################################################################################################################
+##### k-fold cross-validation for GBLUP ########
+# set number of iterations
+
+num_iterationsG_opt <- 10
+pheno.subset_sorted <- pheno.subset[order(pheno.subset$GenoID),]
+
+# Create a data frame with GenoID column and num_iterationsG  additional columns
+
+# Create a data frame with GenoID column and n additional columns to store HB_GEBV and HB_SE for training set
+combG_IT_training_opt <- data.frame(GenoID = pheno.subset_sorted$GenoID, HB = pheno.subset_sorted$HB, stringsAsFactors = FALSE)
+combG_IT_SE_training_opt <- data.frame(GenoID = pheno.subset_sorted$GenoID, stringsAsFactors = FALSE)
+
+# Create a data frame with GenoID column and n additional columns to store HB_GEBV and HB_SE for testing set
+combG_IT_testing_opt <- data.frame(GenoID = pheno.subset_sorted$GenoID, HB = pheno.subset_sorted$HB, stringsAsFactors = FALSE)
+combG_IT_SE_testing_opt <- data.frame(GenoID = pheno.subset_sorted$GenoID, stringsAsFactors = FALSE)
+
+
+# Prepare data for cross-validation
+pheno.subset_sorted <- pheno.subset[order(pheno.subset$GenoID),]
+kG <- 5
+nG <- length(pheno.subset_sorted$GenoID)
+selG <- rep(1:kG, length.out = nG) # this will shuffle the fold assignments
+
+yG <- data.frame(GenoID = pheno.subset_sorted$GenoID, HB = pheno.subset_sorted$HB)   # Response variable
+
+#Initialize data frames to store predicted values
+#predictions_training <- data.frame(GenoID = pheno.subset_sorted$GenoID, HB_obs = pheno.subset_sorted$HB, HB_GEBV = rep(NA, nG), HB_SE = rep(NA, nG))
+#predictions_testing <- data.frame(GenoID = pheno.subset_sorted$GenoID, HB_obs = pheno.subset_sorted$HB, HB_GEBV = rep(NA, nG), HB_SE = rep(NA, nG), fold = rep(NA, nG))
+h2_optcv_Cullis <- matrix(data=NA, nrow=kG, ncol=1)
+h2_optcv_stand <- matrix(data=NA, nrow=kG, ncol=1)
+PA_optG_training <- matrix(data=NA, nrow=kG, ncol=1)
+PA_optG_testing <- matrix(data=NA, nrow=kG, ncol=1)
+
+# Initialize variables to store cumulative results for interation
+total_h2_optcv_Cullis <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_h2_optcv_stand <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_PA_optG_training <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_PA_optG_testing <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_optACC_Cullis_training <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_optACC_stand_training <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_optACC_Cullis_testing <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+total_optACC_stand_testing <- matrix(data=NA, nrow = num_iterationsG_opt, ncol=1)
+
+# Select the first 100 principal components for error variance estimation
+selected_pcs_G <- pca.score[, 1:100]
+selected_pc100_G <- as.matrix(selected_pcs_G)
+
+# Main loop for cross-validation iterations
+for (iteration in 1:num_iterationsG_opt){
+  
+  
+  # Sample data into k groups for cross-validation
+  groupG <- sample(selG, nG)
+  table(groupG) 
+  
+  # Fit GBLUP model and evaluate performance for each group
+  for (fold in 1:kG){
+    
+    # Split the data into training and validation sets
+    training_indices <- which(selG != fold)
+    validation_indices <- which(selG == fold)
+    
+    # Select optimized training set for each fold
+    # Extract training and validation data
+    
+    training_data <- pheno.subset_sorted[selG != fold, ]
+    validation_data <- pheno.subset_sorted[selG == fold, ]
+    
+    
+    # Use GenAlgForSubsetSelection function with PEVMEAN optimality criterion
+    Candidates_G <- pheno.subset_sorted$GenoID
+    nG_train <- length(training_data$GenoID)
+    Test_G <- validation_data$GenoID
+    Trainopt_G <- GenAlgForSubsetSelection(P=selected_pc100_G[rownames(selected_pc100_G)%in%Candidates_G,],
+                                           Candidates=Candidates_G,
+                                           Test=Test_G,
+                                           ntoselect=1480, 
+                                           InitPop=NULL,
+                                           npop=100, 
+                                           nelite=5, 
+                                           mutprob=.8, 
+                                           mutintensity = 1,
+                                           niterations=300,
+                                           minitbefstop=100, 
+                                           tabumemsize = 1,
+                                           plotiters=FALSE,
+                                           lambda=1e-6,
+                                           errorstat="PEVMEAN", 
+                                           mc.cores = 8)
+    
+    TrainID_G <- as.data.frame(Trainopt_G$`Solution with rank 1`)
+    names(TrainID_G)[1] = "GenoID"
+    
+    # Convert GenoID columns to character type
+    TrainID_G$GenoID <- as.character(TrainID_G$GenoID)
+    training_data$GenoID <- as.character(training_data$GenoID)
+    validation_data$GenoID <- as.character(validation_data$GenoID)
+    
+    # Exclude individuals from Train_G tAat are present in validation_data
+    Train_G <- training_data[(training_data$GenoID %in% TrainID_G$GenoID), ]
+    
+    nG_trainF <- length(Train_G$GenoID)
+    
+    # Exclude individuals from Train_G tAat are present in validation_data
+    excluded_individuals_G <- training_data[!(training_data$GenoID %in% TrainID_G$GenoID), ]
+    
+    
+    # Add excluded individuals to validation set
+    validationG_dataF <- rbind(validation_data, excluded_individuals_G)%>% distinct()
+    nG_testF <- length(validationG_dataF$GenoID)
+    length(unique(validationG_dataF$GenoID))
+    
+    yG_train_opt <- Train_G$HB
+    yG_test_opt <- validationG_dataF$HB
+    
+    
+    
+    # Initialize data frames to store predicted values
+    predictions_training_opt <- data.frame(GenoID = Train_G$GenoID, HB_obs = Train_G$HB, HB_GEBV = rep(NA, nG_trainF), HB_SE = rep(NA, nG_trainF))
+    predictions_testing_opt <- data.frame(GenoID = validationG_dataF$GenoID, HB_obs = validationG_dataF$HB, HB_GEBV = rep(NA, nG_testF), HB_SE = rep(NA, nG_testF), fold = rep(NA, nG_testF))
+    
+    yGcv_opt <- Train_G$HB
+    
+    for (j in 1:nG_trainF) {
+      if(groupG[j] == fold) { yGcv_opt[j]<-NA }
+    }
+    
+    # Implement GBLUP model fitting and evaluation here
+    Train_G$GenoID <- as.factor(Train_G$GenoID)
+    Train_G$Family <- as.factor(Train_G$Family)
+    GBLUPcv_opt <- asreml(fixed = yGcv_opt ~ 1, # +Family,
+                          random = ~vm(GenoID, Ginv.sparse) + Family,
+                          residual = ~idv(units,init = 0.1),
+                          na.action = na.method(x = 'include', y = 'include'),
+                          workspace = 1e07,
+                          pworkspace=32e6,
+                          data = Train_G,
+                          start = list(GenoID = 6, Family = 2))
+    
+    #GBLUPCV_opt <- update.asreml(GBLUPCV_opt)
+    #GBLUPCV_opt <- update.asreml(GBLUPCV_opt)
+    #GBLUPCV_opt <- update.asreml(GBLUPCV_opt)
+    #GBLUPCV_opt <- update.asreml(GBLUPCV_opt)
+    #GBLUPCV_opt <- update.asreml(GBLUPCV_opt)
+    #GEBVCV_opt <- as.data.frame(summary(GBLUPCV_opt, coef=TRUE)$coef.random)
+    #GEBVCV_opt <- GEBVCV_opt[order(rownames(GEBVCV_opt)),]
+    #GEBVCV_opt <- GEBVCV_opt[,1]
+    
+    # Predict on the training set
+    predGcv_opt <- predict(GBLUPcv_opt, classify="GenoID", sed=T, pworkspace = 32e36)
+    predGBLUPcv1_opt <- predGcv_opt$pvals
+    predGBLUPcv_opt <- as.data.frame(predGBLUPcv1_opt[,1:3])
+    
+    # Extract genetic variance and avsed
+    varcomp_GGBLUPcv_opt <- as.data.frame(summary(GBLUPcv_opt)$varcomp)
+    varg_GGBLUPcv_opt <- varcomp_GGBLUPcv_opt[2,1]
+    
+    # Extract avsed
+    avsed_GBLUPcv1_opt <- as.data.frame(predGcv_opt$avsed)
+    avsed_GBLUPcv_opt <-  avsed_GBLUPcv1_opt[2,1]
+    
+    # Estimate heritability using Cullis et al. and the standard approach
+    (h2_GBLUPcv_Cullis_opt <- vpredict(GBLUPcv_opt,h2~varg_GGBLUPcv_opt/(varg_GGBLUPcv_opt + (avsed_GBLUPcv_opt)/2)))
+    (h2_optcv_Cullis[fold] <- as.numeric(h2_GBLUPcv_Cullis_opt[1]))
+    
+    # standard approach
+    h2_GBLUPcv_stand_opt <- varcomp_GGBLUPcv_opt['vm(GenoID, Ginv.sparse)', 'component'] / 
+      (varcomp_GGBLUPcv_opt['vm(GenoID, Ginv.sparse)', 'component'] + varcomp_GGBLUPcv_opt['Family', 'component'] +
+         varcomp_GGBLUPcv_opt['units!units', 'component'])
+    
+    (h2_optcv_stand[fold] <- as.numeric(h2_GBLUPcv_stand_opt[1]))
+    
+    # Convert GenoID columns to character type
+    predictions_training_opt$GenoID <- as.character(predictions_training_opt$GenoID)
+    predGBLUPcv_opt$GenoID <- as.character(predGBLUPcv_opt$GenoID)
+    
+    # Merge predHGBLUPcv with predictions_training based on GenoID
+    predGBLUPcvF_training_opt <- merge(predGBLUPcv_opt, predictions_training_opt, by = "GenoID", all.x = TRUE)
+    
+    # Predictive Ability  corr(yadj,ghat) training
+    (PA_optG_training[fold] <- cor(predGBLUPcvF_training_opt$HB_obs, predGBLUPcvF_training_opt$predicted.value, method='pearson', use="complete.obs"))
+    
+    for (j in 1:nG_train) {
+      #if(groupG[j] == fold) { predictions_training[j] <- GEBVcv[j] } 
+      if(groupG[j] == fold) { 
+        predictions_training_opt$HB_GEBV[predictions_training_opt$GenoID == predGBLUPcvF_training_opt$GenoID[j]] <- predGBLUPcvF_training_opt$predicted.value[j]
+        predictions_training_opt$SE_GEBV[predictions_training_opt$GenoID == predGBLUPcvF_training_opt$GenoID[j]] <- predGBLUPcvF_training_opt$std.error[j]} 
+    }
+    
+    # Predict the validation set
+    validation_pred_opt <- predict(GBLUPcv_opt, 
+                                   classify="GenoID", 
+                                   sed=T, 
+                                   newdata = validationG_dataF, 
+                                   pworkspace = 32e36)
+    
+    predGBLUPcv_testing1_opt <- validation_pred_opt$pvals
+    predGBLUPcv_testing_opt <- as.data.frame(predGBLUPcv_testing1_opt[,1:3])
+    
+    # Convert GenoID columns to character type
+    predictions_testing_opt$GenoID <- as.character(predictions_testing_opt$GenoID)
+    predGBLUPcv_testing_opt$GenoID <- as.character(predGBLUPcv_testing_opt$GenoID)
+    
+    # Merge predHGBLUPcv with predictions_testing based on GenoID
+    predGBLUPcvF_testing_opt <- merge(predGBLUPcv_testing_opt, predictions_testing_opt, by = "GenoID", all.x = TRUE)
+    
+    (PA_optG_testing[fold] <- cor(predGBLUPcvF_testing_opt$HB_obs, predGBLUPcvF_testing_opt$predicted.value, method='pearson', use="complete.obs"))
+    
+    for (z in 1:nG_testF) {
+      # insert predicted values into predictions_testing
+      if (predGBLUPcv_testing_opt$GenoID[z] %in% predictions_testing_opt$GenoID) {
+        predictions_testing_opt$HB_GEBV[predictions_testing_opt$GenoID == predGBLUPcvF_testing_opt$GenoID[z]] <- predGBLUPcv_testing_opt$predicted.value[z]
+        predictions_testing_opt$SE_GEBV[predictions_testing_opt$GenoID == predGBLUPcvF_testing_opt$GenoID[z]] <- predGBLUPcv_testing_opt$std.error[z]
+        predictions_testing_opt$Fold[predictions_testing_opt$GenoID == predGBLUPcvF_testing_opt$GenoID[z]] <- fold
+      }
+    }
+  }
+  
+  # Heritability (GS cross-validation)
+  h2_optcv_Cullis
+  mean(h2_optcv_Cullis)
+  h2_optcv_stand
+  mean(h2_optcv_stand)
+  PA_optG_training
+  mean(PA_optG_training)
+  PA_optG_testing
+  mean(PA_optG_testing)
+  
+  # Predictive Accuracy corr(greal,ghat)
+  (optACC_G_Cullis_training <- PA_optG_training/sqrt(mean(h2_optcv_Cullis)))  # Approximation
+  (optACC_G_stand_training <- PA_optG_training/sqrt(mean(h2_optcv_stand)))  # Approximation
+  
+  (optACC_G_Cullis_testing <- PA_optG_testing/sqrt(mean(h2_optcv_Cullis)))  # Approximation
+  (optACC_G_stand_testing <- PA_optG_testing/sqrt(mean(h2_optcv_stand)))  # Approximation
+  
+  # Update cumulative results at the end of each iteration
+  total_h2_optcv_Cullis[iteration] <- mean(h2_optcv_Cullis)
+  total_h2_optcv_stand[iteration] <- mean(h2_optcv_stand)
+  total_PA_optG_training[iteration] <- mean(PA_optG_training)
+  total_PA_optG_testing[iteration] <- mean(PA_optG_testing)
+  total_optACC_Cullis_training[iteration] <- optACC_G_Cullis_training
+  total_optACC_Cullis_testing[iteration] <- optACC_G_Cullis_testing
+  total_optACC_stand_training[iteration] <- optACC_G_stand_training
+  total_optACC_stand_testing[iteration] <- optACC_G_stand_testing
+  
+  # Store HB_GEBV and SE_GEBV values for each iteration in training set
+  for (p in 1:nrow(predGBLUPcvF_training_opt)) {
+    if (predGBLUPcvF_training_opt$GenoID[p] %in% combG_IT_training_opt$GenoID) {
+      index_opt <- which(combG_IT_training_opt$GenoID == predGBLUPcvF_training_opt$GenoID[p])
+      combG_IT_training_opt[[paste0("HB_GEBV_", iteration)]][index_opt] <- predGBLUPcvF_training_opt$predicted.value[p]
+      combG_IT_SE_training_opt[[paste0("SE_GEBV_", iteration)]][index_opt] <- predGBLUPcvF_training_opt$std.error[p]
+    } else {
+      cat("GenoID", predGBLUPcvF_training_opt$GenoID[j], "not found in combG_IT_training\n")
+    }
+  }
+  
+  # Store HB_GEBV and SE_GEBV values for each iteration in testing set
+  for (p in 1:nrow(predGBLUPcvF_testing_opt)) {
+    if (predGBLUPcvF_testing_opt$GenoID[p] %in% combG_IT_testing_opt$GenoID) {
+      index_opt <- which(combG_IT_testing_opt$GenoID == predGBLUPcvF_testing_opt$GenoID[p])
+      combG_IT_testing_opt[[paste0("HB_GEBV_", iteration)]][index_opt] <- predGBLUPcvF_testing_opt$predicted.value[p]
+      combG_IT_SE_testing_opt[[paste0("SE_GEBV_", iteration)]][index_opt] <- predGBLUPcvF_testing_opt$std.error[p]
+    } else {
+      cat("GenoID", predGBLUPcvF_testing_opt$GenoID[j], "not found in combG_IT_testing\n")
+    }
+  }
+}
+
+# Calculate row means of HB_GEBV over iterations
+combG_IT_training_opt$HB_GEBV_avg <- rowMeans(combG_IT_training_opt[, -(1:2)], na.rm = TRUE)
+combG_IT_SE_training_opt$SE_GEBV_avg <- rowMeans(combG_IT_SE_training_opt[, -1], na.rm = TRUE)
+combG_training_final_opt <- merge(combG_IT_training, combG_IT_SE_training_opt, by = "GenoID", all = TRUE)
+
+combG_IT_testing_opt$HB_GEBV_avg <- rowMeans(combG_IT_testing_opt[, -(1:2)], na.rm = TRUE)
+combG_IT_SE_testing_opt$SE_GEBV_avg <- rowMeans(combG_IT_SE_testing_opt[, -1], na.rm = TRUE)
+combG_testing_final_opt <- merge(combG_IT_testing_opt, combG_IT_SE_testing_opt, by = "GenoID", all = TRUE)
+
+summary(combG_IT_SE_testing_opt$SE_GEBV_avg)
+head(combG_testing_final_opt)
+
+# merge by rows
+write.table(combG_training_final_opt, file = "HB_GBLUP_pred_training_opt.csv", row.names = F)
+write.table(combG_testing_final_opt , file = "HB_GBLUP_pred_testing_opt.csv", row.names = F)
+
+# Calculate average values over all iterations
+avg_h2_optcv_Cullis <- mean(total_h2_optcv_Cullis)
+avg_h2_optcv_stand <- mean(total_h2_optcv_stand)
+avg_PA_optG_training <- mean(total_PA_optG_training)
+avg_PA_optG_testing <- mean(total_PA_optG_testing)
+avg_optACC_Cullis_training <- mean(total_optACC_Cullis_training)
+avg_optACC_stand_training <- mean(total_optACC_stand_training)
+avg_optACC_Cullis_testing <- mean(total_optACC_Cullis_testing)
+avg_optACC_stand_testing <- mean(total_optACC_stand_testing)
+
+# Print or use the average values as needed
+print(avg_h2_optcv_Cullis)
+print(avg_h2_optcv_stand)
+print(avg_PA_optG_training)
+print(avg_PA_optG_testing)
+print(avg_optACC_Cullis_training)
+print(avg_optACC_stand_training)
+print(avg_optACC_Cullis_testing)
+print(avg_optACC_stand_testing)
